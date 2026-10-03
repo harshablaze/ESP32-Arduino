@@ -1,0 +1,113 @@
+import io
+import urllib.parse
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+
+# Global internal states for your clock hardware configuration dashboard
+clock_settings = {
+    "brightness": 1,   # Value between 1 and 255
+    "sleep": 0,        # 0 = Awake, 1 = Force Screen completely OFF
+    "flip": 0          # 0 = Normal Dark Background, 1 = Negative White Background
+}
+
+class ClockControlHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        # 1. ESP32 JSON Endpoint: Serves target system configurations out to hardware
+        if self.path == "/settings":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            # Allow cross-origin requests just in case
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            
+            import json
+            response_data = json.dumps(clock_settings)
+            self.wfile.write(bytes(response_data, "utf-8"))
+            return
+
+        # 2. Browser Dashboard Interface Home Endpoint (http://localhost:8080/)
+        if self.path == "/" or self.path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            
+            # Simple, clean interactive control dashboard panel mockup
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>OLED Clock Control Center</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ background-color: #121212; color: #ffffff; font-family: -apple-system, sans-serif; text-align: center; padding: 30px 15px; }}
+                    .card {{ background: #1e1e1e; padding: 25px; border-radius: 12px; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.5); max-width: 320px; width: 100%; }}
+                    h1 {{ margin-bottom: 5px; font-size: 22px; color: #00adb5; }}
+                    p.status {{ color: #888; font-size: 13px; margin-bottom: 25px; }}
+                    .control-group {{ margin-bottom: 25px; text-align: left; }}
+                    label {{ font-weight: bold; display: block; margin-bottom: 8px; font-size: 14px; color: #eee; }}
+                    .btn {{ display: block; width: 100%; padding: 12px; font-size: 15px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; color: white; transition: 0.2s; }}
+                    .btn-off {{ background-color: #d9534f; }}
+                    .btn-off:hover {{ background-color: #c9302c; }}
+                    .btn-on {{ background-color: #5cb85c; }}
+                    .btn-on:hover {{ background-color: #4cae4c; }}
+                    .btn-flip {{ background-color: #f0ad4e; color: #121212; }}
+                    .btn-flip:hover {{ background-color: #ec971f; }}
+                    input[type=range] {{ width: 100%; height: 8px; border-radius: 5px; background: #333; outline: none; }}
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>OLED Clock Panel</h1>
+                    <p class="status">Real-Time Settings Controller</p>
+                    
+                    <form action="/update" method="POST">
+                        <div class="control-group">
+                            <label>Brightness Slider ({clock_settings['brightness']}/255):</label>
+                            <input type="range" name="brightness" min="1" max="255" value="{clock_settings['brightness']}" onchange="this.form.submit()">
+                        </div>
+                        
+                        <div class="control-group" style="margin-top: 30px;">
+                            <label>Screen Toggle:</label>
+                            {"<button type='submit' name='sleep' value='1' class='btn btn-off'>TURN SCREEN OFF</button>" if clock_settings['sleep'] == 0 else "<button type='submit' name='sleep' value='0' class='btn btn-on'>WAKE SCREEN UP</button>"}
+                        </div>
+
+                        <div class="control-group">
+                            <label>Display Inversion Mode:</label>
+                            {"<button type='submit' name='flip' value='1' class='btn btn-flip'>ACTIVATE NEGATIVE TEXT</button>" if clock_settings['flip'] == 0 else "<button type='submit' name='flip' value='0' class='btn btn-flip' style='background:#ffffff; color:#000;'>RESTORE DARK BACKGROUND</button>"}
+                        </div>
+                    </form>
+                </div>
+            </body>
+            </html>
+            """
+            self.wfile.write(bytes(html_content, "utf-8"))
+            return
+
+        return super().do_GET()
+
+    def do_POST(self):
+        global clock_settings
+        if self.path == "/update":
+            # Extract incoming parameter values from dashboard forms cleanly
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            params = urllib.parse.parse_qs(post_data)
+
+            # Update live tracking variables safely depending on which button was clicked
+            if 'brightness' in params:
+                clock_settings['brightness'] = int(params['brightness'][0])
+            if 'sleep' in params:
+                clock_settings['sleep'] = int(params['sleep'][0])
+            if 'flip' in params:
+                clock_settings['flip'] = int(params['flip'][0])
+
+            # Redirect right back to main user dashboard display view instantly
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.end_headers()
+
+if __name__ == "__main__":
+    server_address = ("", 8080)
+    httpd = HTTPServer(server_address, ClockControlHandler)
+    print("🚀 Separate Clock Configuration Server running on port 8080...")
+    print("👉 Control your device from your PC browser at: http://localhost:8080/")
+    httpd.serve_forever()
