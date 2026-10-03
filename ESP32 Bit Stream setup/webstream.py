@@ -13,6 +13,10 @@ PREVIEW_PNG = "preview.png"
 # Allowed media formats
 VALID_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.mp4', '.avi', '.mkv', '.mov')
 
+# Debug & Output Control Flags
+DEBUG_LOGS = False      # Controls HTTP request server console logs
+VERBOSE_LOGS = False    # Controls internal file processing and playlist rotation logs
+
 # Global Playlist Engine State Registers
 playlist = []
 current_media_idx = -1
@@ -35,8 +39,7 @@ def discover_and_shuffle_media():
     
     media_files = []
     for f in files:
-        ext = os.path.splitext(f)[1].lower() # FIXED: Added index [1] to pull extension string from tuple
-        # Filter files cleanly based on requirements
+        ext = os.path.splitext(f)[1].lower()
         if ext in VALID_EXTENSIONS and not f.endswith(('.py', '.bat')):
             media_files.append(f)
             
@@ -45,13 +48,13 @@ def discover_and_shuffle_media():
         playlist = []
         return
 
-    # Randomly seed and shuffle the entire list array cleanly
     random.seed(time.time())
     random.shuffle(media_files)
     playlist = media_files
     current_media_idx = 0
-    print(f"🎲 Shuffled playlist initialized with {len(playlist)} items.")
-    print(f"📋 Queued Tracklist: {playlist}")
+    if VERBOSE_LOGS:
+        print(f"🎲 Shuffled playlist initialized with {len(playlist)} items.")
+        print(f"📋 Queued Tracklist: {playlist}")
 
 def load_and_process_media(filename):
     """Processes images, GIFs, and MP4 files into a standardized 128x64 black-and-white stream matrix."""
@@ -61,37 +64,34 @@ def load_and_process_media(filename):
     if not os.path.exists(target_path):
         return False
 
-    print(f"🔄 Processing upcoming media asset: {filename}...")
+    if VERBOSE_LOGS:
+        print(f"🔄 Processing upcoming media asset: {filename}...")
+    
     cached_frames_bin = []
     cached_frames_png = []
     frame_delays = []
     
-    ext = os.path.splitext(filename)[1].lower() # FIXED: Added index [1] here as well
+    ext = os.path.splitext(filename)[1].lower()
 
-    # --- ROUTING LOGIC BRANCH A: HANDLE MP4/MOV VIDEO SELECTIONS ---
     if ext in ('.mp4', '.avi', '.mkv', '.mov'):
         try:
             cap = cv2.VideoCapture(target_path)
             fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0: fps = 20.0 # Standard defensive fallback calculation
+            if fps <= 0: fps = 20.0
             
             frame_delay_sec = 1.0 / fps
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            # Compute actual natural runtime duration
             natural_duration = frame_count * frame_delay_sec
-            media_total_duration = max(10.0, natural_duration) # Guarantee minimum 10 seconds rule
+            media_total_duration = max(10.0, natural_duration)
             
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
-                # Convert OpenCV BGR array directly into Pillow Image matrix
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(rgb_frame).convert("L")
-                
-                # Resize and fit to 128x64 dithered 1-bit Black & White matrix
                 img = ImageOps.fit(img, (128, 64), Image.Resampling.LANCZOS).convert("1")
                 
                 cached_frames_bin.append(img.tobytes())
@@ -103,30 +103,28 @@ def load_and_process_media(filename):
                 
             cap.release()
             total_frames = len(cached_frames_bin)
-            print(f"✅ Successfully converted MP4 clip: {total_frames} frames. Playback duration limit: {media_total_duration:.2f}s")
+            if VERBOSE_LOGS:
+                print(f"✅ Successfully converted MP4 clip: {total_frames} frames. Playback duration limit: {media_total_duration:.2f}s")
             return True
         except Exception as e:
             print(f"❌ Structural breakdown processing video file: {e}")
             return False
 
-    # --- ROUTING LOGIC BRANCH B: HANDLE STANDARD IMAGES & ANIMS (GIF/PNG/JPG) ---
     try:
         img = Image.open(target_path)
         is_animated = getattr(img, "is_animated", False)
         total_frames = img.n_frames if is_animated else 1
         
-        # Static asset handling defaults to 10 seconds threshold limit
         if not is_animated:
             media_total_duration = 10.0
         else:
-            # Animation processing metrics tracking
             total_anim_time = 0.0
             for idx in range(total_frames):
                 img.seek(idx)
                 duration = img.info.get("duration", 100)
                 if duration < 20: duration = 100
                 total_anim_time += (duration / 1000.0)
-            media_total_duration = max(10.0, total_anim_time) # Guarantee minimum 10 seconds rule
+            media_total_duration = max(10.0, total_anim_time)
 
         for frame_idx in range(total_frames):
             img.seek(frame_idx)
@@ -143,7 +141,8 @@ def load_and_process_media(filename):
             if duration < 20: duration = 100
             frame_delays.append(duration / 1000.0)
             
-        print(f"✅ Successfully processed image data block: {total_frames} frame(s). Playback duration limit: {media_total_duration:.2f}s")
+        if VERBOSE_LOGS:
+            print(f"✅ Successfully processed image data block: {total_frames} frame(s). Playback duration limit: {media_total_duration:.2f}s")
         return True
     except Exception as e:
         print(f"❌ Structural breakdown processing photo/GIF data: {e}")
@@ -160,25 +159,23 @@ def update_playlist_state_machine():
 
     now = time.time()
     
-    # Check if it's time to cycle over to the next track entry frame list
     if current_media_file == "" or (now - media_start_time) >= media_total_duration:
         if current_media_file != "":
-            print(f"⏰ Finished playing asset frame loop for tracking block. Advancing...")
+            if VERBOSE_LOGS:
+                print(f"⏰ Finished playing asset frame loop for tracking block. Advancing...")
             current_media_idx = (current_media_idx + 1) % len(playlist)
             
-            # Shuffle playlist again when looping back around to keep it fresh
             if current_media_idx == 0:
-                print("🔄 End of track rotation loop. Re-seeding deck arrays.")
+                if VERBOSE_LOGS:
+                    print("🔄 End of track rotation loop. Re-seeding deck arrays.")
                 discover_and_shuffle_media()
                 if not playlist: return
 
         current_media_file = playlist[current_media_idx]
         media_start_time = now
         
-        # Load and decode into structural core storage layers
         success = load_and_process_media(current_media_file)
         if not success:
-            # Skip corrupted parameters cleanly
             current_media_file = ""
 
 def get_current_frame_index():
@@ -189,7 +186,6 @@ def get_current_frame_index():
     total_duration = sum(frame_delays)
     elapsed_since_start = time.time() - media_start_time
     
-    # Calculate loop cycle position matching timeline requirements
     current_time = elapsed_since_start % total_duration
     
     elapsed = 0.0
@@ -200,12 +196,15 @@ def get_current_frame_index():
     return 0
 
 class AnimatedStreamHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Override to suppress standard HTTP request server console logs unless explicitly requested
+        if DEBUG_LOGS:
+            super().log_message(format, *args)
+
     def do_GET(self):
-        # Fire state machine check tick inside every coming web hook handler call
         update_playlist_state_machine()
         current_idx = get_current_frame_index()
 
-        # ESP32 Endpoint structure path checking matches your source code configuration setup
         if self.path == f"/{OUTPUT_BIN}":
             self.send_response(200)
             self.send_header("Content-type", "application/octet-stream")
@@ -214,7 +213,6 @@ class AnimatedStreamHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(cached_frames_bin[current_idx])
             return
             
-        # Monitor Preview Browser Endpoint asset alignment routing
         if self.path == f"/{PREVIEW_PNG}":
             self.send_response(200)
             self.send_header("Content-type", "image/png")
@@ -223,7 +221,6 @@ class AnimatedStreamHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(cached_frames_png[current_idx])
             return
 
-        # Core Browser Dash Monitoring Screen View Layout Template
         if self.path == "/" or self.path == "/index.html":
             html_content = f"""
             <!DOCTYPE html>
@@ -262,11 +259,16 @@ class AnimatedStreamHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__ == "__main__":
-    # Scan files array configuration definitions on engine deployment initializing setup routines
+    # Scan files array configuration definitions on engine deployment initializing setup routines cleanly before masking logs
+    files = [f for f in os.listdir(WATCH_FOLDER) if os.path.isfile(os.path.join(WATCH_FOLDER, f))]
+    media_count = len([f for f in files if os.path.splitext(f)[1].lower() in VALID_EXTENSIONS and not f.endswith(('.py', '.bat'))])
+    
+    print(f"🎲 Shuffled playlist initialized with {media_count} items.")
     discover_and_shuffle_media()
     
     server_address = ("", 8080)
     httpd = HTTPServer(server_address, AnimatedStreamHandler)
     print("PC Playback Playlist Engine deployed cleanly on network port 8080...")
     print("👉 Watch your randomized media slideshow run inside your computer browser at: http://localhost:8080/")
+    
     httpd.serve_forever()
