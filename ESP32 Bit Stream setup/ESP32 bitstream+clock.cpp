@@ -18,7 +18,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 volatile uint8_t dynamicBrightness = 1; 
 volatile uint8_t dynamicFlipState  = 0; // 0 = Normal, 1 = Negative Display
 volatile uint8_t dynamicForceSleep = 0; // 0 = Normal, 1 = Force Screen Off Override
-volatile uint8_t pixelShiftTest    = 1; // 0 = Normal Slow Shift, 1 = Fast-paced Shift Test Mode
+volatile uint8_t pixelShiftTest    = 0; // 0 = Normal Slow Shift, 1 = Fast-paced Shift Test Mode
+volatile uint8_t enableGlitch      = 1; // 0 = Glitch Disabled, 1 = Glitch Enabled
+volatile uint8_t borderStyle       = 1; // 0 = Solid Border, 1 = Animated Dotted Border
 
 // Local Tracking States
 uint8_t currentAppliedFlip = 0;
@@ -61,11 +63,17 @@ TaskHandle_t NetworkTaskHandle = NULL;
 int8_t shiftX = 0;
 int8_t shiftY = 0;
 uint32_t lastShiftTime = 0;
-uint32_t lastGlitchTime = 0;
+uint32_t lastMarqueeTime = 0;
 uint8_t shiftPatternIndex = 0;
+uint8_t dottedLineOffset = 0;
+
+struct ShiftCoord {
+  int8_t x;
+  int8_t y;
+};
 
 // The predefined 3-pixel bounded shift coordinate system
-const int8_t shiftPattern[][2] = {
+const ShiftCoord shiftPattern[] = {
   {0, 0}, {1, 0}, {2, 0}, {3, 0},
   {3, 1}, {2, 1}, {1, 1}, {0, 1},
   {0, 2}, {1, 2}, {2, 2}, {3, 2},
@@ -84,6 +92,55 @@ int getTextWidth(const char* text, int textSize) {
 void setDisplayBrightness(uint8_t brightness) {
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(brightness);
+}
+
+// Custom function to draw the dynamic crawling marquee dotted border
+void drawAnimatedDottedBox(int16_t startX, int16_t startY, int16_t w, int16_t h, uint8_t offset) {
+  // Top edge
+  for (int16_t x = 0; x < w; x++) {
+    int16_t globalX = startX + x;
+    if ((x + offset) % 6 < 2) {
+      display.drawPixel(globalX, startY, SSD1306_WHITE);
+    }
+  }
+  // Bottom edge
+  for (int16_t x = 0; x < w; x++) {
+    int16_t globalX = startX + x;
+    if ((x + offset) % 6 < 2) {
+      display.drawPixel(globalX, startY + h - 1, SSD1306_WHITE);
+    }
+  }
+  // Left edge
+  for (int16_t y = 0; y < h; y++) {
+    int16_t globalY = startY + y;
+    if ((y + offset) % 6 < 2) {
+      display.drawPixel(startX, globalY, SSD1306_WHITE);
+    }
+  }
+  // Right edge
+  for (int16_t y = 0; y < h; y++) {
+    int16_t globalY = startY + y;
+    if ((y + offset) % 6 < 2) {
+      display.drawPixel(startX + w - 1, globalY, SSD1306_WHITE);
+    }
+  }
+}
+
+// Applies horizontal slicing displacement to mimic a cyberpunk graphical error
+void applyGlitchEffect(int16_t x, int16_t y, int16_t w, int16_t h) {
+  if (random(0, 100) > 92) { // 8% chance to execute per display refresh
+    int16_t sliceY = y + random(2, h - 4);
+    int16_t sliceH = random(1, 4);
+    int16_t shiftVal = random(-3, 4);
+    
+    // Draw an intersecting black rectangle to strip data lines out cleanly
+    display.fillRect(x, sliceY, w, sliceH, SSD1306_BLACK);
+    
+    // Shift elements visually using pixel drawing blocks
+    if (shiftVal != 0) {
+      display.drawFastHLine(x + shiftVal, sliceY, w - abs(shiftVal), SSD1306_WHITE);
+    }
+  }
 }
 
 // ==========================================================
@@ -111,11 +168,12 @@ void networkManagementTask(void * parameter) {
             dynamicForceSleep = doc["sleep"] | 0;
             dynamicFlipState  = doc["flip"] | 0;
             pixelShiftTest    = doc["pixelShiftTest"] | 0; // Parse fast test flag from JSON payload
+            enableGlitch       = doc["glitch"] | 0;       // Parse glitch toggle state
+            borderStyle        = doc["borderStyle"] | 0;   // Parse border format configuration
           }
         }
-        http.end(); // Clean up connection allocation
+        http.end(); 
 
-        // Immediately check the streaming endpoint before triggering the 2-second delay
         http.begin(streamUrl);
         http.setTimeout(200); 
         httpCode = http.GET();
@@ -212,23 +270,6 @@ void handleSleepSchedule(struct tm* timeinfo) {
   }
 }
 
-// Applies horizontal slicing displacement to mimic a cyberpunk graphical error
-void applyGlitchEffect(int16_t x, int16_t y, int16_t w, int16_t h) {
-  if (random(0, 100) > 92) { // 8% chance to execute per display refresh
-    int16_t sliceY = y + random(2, h - 4);
-    int16_t sliceH = random(1, 4);
-    int16_t shiftVal = random(-3, 4);
-    
-    // Draw an intersecting black rectangle to strip data lines out cleanly
-    display.fillRect(x, sliceY, w, sliceH, SSD1306_BLACK);
-    
-    // Shift elements on top row visually using pixel drawing blocks
-    if (shiftVal != 0) {
-      display.drawFastHLine(x + shiftVal, sliceY, w - abs(shiftVal), SSD1306_WHITE);
-    }
-  }
-}
-
 void displayClockFace(struct tm* timeinfo) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -240,8 +281,15 @@ void displayClockFace(struct tm* timeinfo) {
   if (now - lastShiftTime >= shiftInterval) {
     lastShiftTime = now;
     shiftPatternIndex = (shiftPatternIndex + 1) % totalShiftPatterns;
-    shiftX = shiftPattern[shiftPatternIndex][0];
-    shiftY = shiftPattern[shiftPatternIndex][1];
+    shiftX = shiftPattern[shiftPatternIndex].x;
+    shiftY = shiftPattern[shiftPatternIndex].y;
+  }
+
+  // Update Crawling Marquee Dotted Line Phase
+  uint32_t marqueeInterval = (pixelShiftTest == 1) ? 50 : 250;
+  if (now - lastMarqueeTime >= marqueeInterval) {
+    lastMarqueeTime = now;
+    dottedLineOffset = (dottedLineOffset + 1) % 6; 
   }
 
   // Periodic Box Swapping Interval Tracker (Swaps placements every 2 minutes)
@@ -280,7 +328,14 @@ void displayClockFace(struct tm* timeinfo) {
   int boxY = 0;
   int boxWidth = 73; 
   int boxHeight = 24; 
-  display.drawRoundRect(dateBoxX, boxY, boxWidth, boxHeight, 2, SSD1306_WHITE);
+  
+  if (borderStyle == 1) {
+    // Dynamic crawling marquee style
+    drawAnimatedDottedBox(dateBoxX, boxY, boxWidth, boxHeight, dottedLineOffset);
+  } else {
+    // Standard solid fallback box line style
+    display.drawRoundRect(dateBoxX, boxY, boxWidth, boxHeight, 2, SSD1306_WHITE);
+  }
 
   char numStr[4];
   sprintf(numStr, "%02d", timeinfo->tm_mday);
@@ -300,13 +355,16 @@ void displayClockFace(struct tm* timeinfo) {
   display.setCursor(startX + numWidth + midGap, textInsideY);
   display.print(monthStr);
 
-  // Apply Cyberpunk glitch visual overrides to the static top blocks
-  applyGlitchEffect(0, 0, SCREEN_WIDTH, 24);
+  // Apply Cyberpunk glitch visual overrides if enabled remotely
+  if (enableGlitch == 1) {
+    applyGlitchEffect(0, 0, SCREEN_WIDTH, 24);
+  }
+
   // ==========================================
-  // BOTTOM ROW: ZERO-GAP TIME LAYOUT (Left unchanged)
+  // BOTTOM ROW: ZERO-GAP TIME LAYOUT
   // ==========================================
   int hour12 = timeinfo->tm_hour % 12;
-  if (hour12 == 0) hour12 = 12;
+  if (hour12 == 0) hour12 = 12; 
   const char* ampm = (timeinfo->tm_hour >= 12) ? "PM" : "AM";
 
   display.setTextSize(3);
