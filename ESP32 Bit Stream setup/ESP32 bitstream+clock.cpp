@@ -5,7 +5,7 @@
 #include "time.h"
 #include "esp_sntp.h"
 #include <HTTPClient.h>
-#include <ArduinoJson.h> // Ensure this library is installed!
+#include <ArduinoJson.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -18,6 +18,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 volatile uint8_t dynamicBrightness = 1; 
 volatile uint8_t dynamicFlipState  = 0; // 0 = Normal, 1 = Negative Display
 volatile uint8_t dynamicForceSleep = 0; // 0 = Normal, 1 = Force Screen Off Override
+volatile uint8_t pixelShiftTest    = 1; // 0 = Normal Slow Shift, 1 = Fast-paced Shift Test Mode
 
 // Local Tracking States
 uint8_t currentAppliedFlip = 0;
@@ -45,7 +46,7 @@ const char* streamUrl   = "http://192.168.0.219:8080/stream.bin";
 // Thread-Safe Shared Buffers and State Flags
 const int frameBufferSize = 1024; // 128x64 pixels / 8 bits
 uint8_t sharedFrameBuffer[frameBufferSize];
-volatile bool isStreamActive = false; // Controlled by Core 0 to route Core 1 graphics rendering
+volatile bool isStreamActive = false; 
 
 // Quick string lookups for the clean text boxes
 const char* daysOfWeek[] = {"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"};
@@ -53,6 +54,28 @@ const char* months[]     = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AU
 
 // Task handles for FreeRTOS dual-core separation
 TaskHandle_t NetworkTaskHandle = NULL;
+
+// ==========================================================
+// SCREEN PRESERVATION & ANIMATION VARIABLES
+// ==========================================================
+int8_t shiftX = 0;
+int8_t shiftY = 0;
+uint32_t lastShiftTime = 0;
+uint32_t lastGlitchTime = 0;
+uint8_t shiftPatternIndex = 0;
+
+// The predefined 3-pixel bounded shift coordinate system
+const int8_t shiftPattern[][2] = {
+  {0, 0}, {1, 0}, {2, 0}, {3, 0},
+  {3, 1}, {2, 1}, {1, 1}, {0, 1},
+  {0, 2}, {1, 2}, {2, 2}, {3, 2},
+  {3, 3}, {2, 3}, {1, 3}, {0, 3},
+  {-1, 0}, {-2, 0}, {-3, 0},
+  {-3, 1}, {-2, 1}, {-1, 1},
+  {-1, 2}, {-2, 2}, {-3, 2},
+  {-3, 3}, {-2, 3}, {-1, 3}
+};
+const uint8_t totalShiftPatterns = sizeof(shiftPattern) / sizeof(shiftPattern[0]);
 
 int getTextWidth(const char* text, int textSize) {
   return strlen(text) * 6 * textSize;
@@ -87,6 +110,7 @@ void networkManagementTask(void * parameter) {
             dynamicBrightness = doc["brightness"] | 1;
             dynamicForceSleep = doc["sleep"] | 0;
             dynamicFlipState  = doc["flip"] | 0;
+            pixelShiftTest    = doc["pixelShiftTest"] | 0; // Parse fast test flag from JSON payload
           }
         }
         http.end(); // Clean up connection allocation
@@ -131,7 +155,7 @@ void networkManagementTask(void * parameter) {
           if (bytesRead == frameBufferSize) {
             memcpy(sharedFrameBuffer, tempBuffer, frameBufferSize);
           } else {
-            isStreamActive = false; // Packet structural drop, drop out out of loop
+            isStreamActive = false; // Packet structural drop, drop out out of loop 
           }
         } else {
           // If server stops running, cleanly exit streaming mode and trigger recovery logic
@@ -188,32 +212,75 @@ void handleSleepSchedule(struct tm* timeinfo) {
   }
 }
 
+// Applies horizontal slicing displacement to mimic a cyberpunk graphical error
+void applyGlitchEffect(int16_t x, int16_t y, int16_t w, int16_t h) {
+  if (random(0, 100) > 92) { // 8% chance to execute per display refresh
+    int16_t sliceY = y + random(2, h - 4);
+    int16_t sliceH = random(1, 4);
+    int16_t shiftVal = random(-3, 4);
+    
+    // Draw an intersecting black rectangle to strip data lines out cleanly
+    display.fillRect(x, sliceY, w, sliceH, SSD1306_BLACK);
+    
+    // Shift elements on top row visually using pixel drawing blocks
+    if (shiftVal != 0) {
+      display.drawFastHLine(x + shiftVal, sliceY, w - abs(shiftVal), SSD1306_WHITE);
+    }
+  }
+}
+
 void displayClockFace(struct tm* timeinfo) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
+  uint32_t now = millis();
+  
+  // Update Pixel Shifting Calculations
+  uint32_t shiftInterval = (pixelShiftTest == 1) ? 200 : 900000; // 200ms for fast testing vs 15 minutes normal tracking
+  if (now - lastShiftTime >= shiftInterval) {
+    lastShiftTime = now;
+    shiftPatternIndex = (shiftPatternIndex + 1) % totalShiftPatterns;
+    shiftX = shiftPattern[shiftPatternIndex][0];
+    shiftY = shiftPattern[shiftPatternIndex][1];
+  }
+
+  // Periodic Box Swapping Interval Tracker (Swaps placements every 2 minutes)
+  bool isBoxSwapped = ((timeinfo->tm_min % 4) >= 2);
+
+  // Set default coordinates for Top Component Sections
+  int16_t dayBoxX = 0;
+  int16_t dateBoxX = 54;
+  
+  if (isBoxSwapped) {
+    dayBoxX = 76;   // Displace to the rightmost track bounds
+    dateBoxX = 0;   // Drop box directly into starting coordinate arrays
+  }
+
   // ==========================================
-  // TOP ROW: PERFECTLY CENTERED DATE & DAY
+  // TOP LEFT SUBSECTION: CENTERED DATE & DAY (With Pixel Shifting applied inside its boundaries)
   // ==========================================
   const char* dayText = daysOfWeek[timeinfo->tm_wday];
   int dayWidth = getTextWidth(dayText, 1);
-  int dayX = (52 - dayWidth) / 2;
+  int dayX = dayBoxX + ((52 - dayWidth) / 2) + shiftX;
+  
   display.setTextSize(1);
-  display.setCursor(dayX, 2);
+  display.setCursor(dayX, 2 + shiftY);
   display.print(dayText);
 
   char yearStr[8];
   sprintf(yearStr, "%d", timeinfo->tm_year + 1900);
   int yearWidth = getTextWidth(yearStr, 1);
-  int yearX = (52 - yearWidth) / 2;
-  display.setCursor(yearX, 13);
+  int yearX = dayBoxX + ((52 - yearWidth) / 2) + shiftX;
+  display.setCursor(yearX, 13 + shiftY);
   display.print(yearStr);
 
-  int boxX = 54;
+  // ==========================================
+  // TOP RIGHT SUBSECTION: BOXED DATE MODULE
+  // ==========================================
   int boxY = 0;
   int boxWidth = 73; 
   int boxHeight = 24; 
-  display.drawRoundRect(boxX, boxY, boxWidth, boxHeight, 2, SSD1306_WHITE);
+  display.drawRoundRect(dateBoxX, boxY, boxWidth, boxHeight, 2, SSD1306_WHITE);
 
   char numStr[4];
   sprintf(numStr, "%02d", timeinfo->tm_mday);
@@ -224,7 +291,7 @@ void displayClockFace(struct tm* timeinfo) {
   int midGap = 6;                                   
   
   int totalTextWidth = numWidth + midGap + monthWidth;
-  int startX = boxX + ((boxWidth - totalTextWidth) / 2);
+  int startX = dateBoxX + ((boxWidth - totalTextWidth) / 2);
   int textInsideY = boxY + 5; 
 
   display.setTextSize(2);
@@ -233,11 +300,13 @@ void displayClockFace(struct tm* timeinfo) {
   display.setCursor(startX + numWidth + midGap, textInsideY);
   display.print(monthStr);
 
+  // Apply Cyberpunk glitch visual overrides to the static top blocks
+  applyGlitchEffect(0, 0, SCREEN_WIDTH, 24);
   // ==========================================
-  // BOTTOM ROW: ZERO-GAP TIME LAYOUT
+  // BOTTOM ROW: ZERO-GAP TIME LAYOUT (Left unchanged)
   // ==========================================
   int hour12 = timeinfo->tm_hour % 12;
-  if (hour12 == 0) hour12 = 12; 
+  if (hour12 == 0) hour12 = 12;
   const char* ampm = (timeinfo->tm_hour >= 12) ? "PM" : "AM";
 
   display.setTextSize(3);
