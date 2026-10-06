@@ -85,6 +85,23 @@ const ShiftCoord shiftPattern[] = {
 };
 const uint8_t totalShiftPatterns = sizeof(shiftPattern) / sizeof(shiftPattern[0]);
 
+// Independent shift parameters for the constrained AM/PM region
+int8_t ampmpixelShiftX = 0;
+int8_t ampmpixelShiftY = 0;
+uint32_t ampmLastShiftTime = 0;
+uint8_t ampmShiftPatternIndex = 0;
+
+// Constrained shift pattern ensuring AM/PM stays strictly within +0 to +2 X and -5 to +0 Y
+const ShiftCoord ampmShiftPattern[] = {
+  {0, 0},  {1, 0},  {2, 0},
+  {2, -1}, {1, -1}, {0, -1},
+  {0, -2}, {1, -2}, {2, -2},
+  {2, -3}, {1, -3}, {0, -3},
+  {0, -4}, {1, -4}, {2, -4},
+  {2, -5}, {1, -5}, {0, -5}
+};
+const uint8_t totalAmpmShiftPatterns = sizeof(ampmShiftPattern) / sizeof(ampmShiftPattern[0]);
+
 int getTextWidth(const char* text, int textSize) {
   return strlen(text) * 6 * textSize;
 }
@@ -285,6 +302,14 @@ void displayClockFace(struct tm* timeinfo) {
     shiftY = shiftPattern[shiftPatternIndex].y;
   }
 
+  // Update Independent Pixel Shifting Calculations for AM/PM Block
+  if (now - ampmLastShiftTime >= shiftInterval) {
+    ampmLastShiftTime = now;
+    ampmShiftPatternIndex = (ampmShiftPatternIndex + 1) % totalAmpmShiftPatterns;
+    ampmpixelShiftX = ampmShiftPattern[ampmShiftPatternIndex].x;
+    ampmpixelShiftY = ampmShiftPattern[ampmShiftPatternIndex].y;
+  }
+
   // Update Crawling Marquee Dotted Line Phase
   uint32_t marqueeInterval = (pixelShiftTest == 1) ? 50 : 250;
   if (now - lastMarqueeTime >= marqueeInterval) {
@@ -381,8 +406,9 @@ void displayClockFace(struct tm* timeinfo) {
   display.setCursor(87, 43);
   display.printf("%02d", timeinfo->tm_sec);
 
+  // Render AM/PM indicator with its own safety-bounded shift coordinates
   display.setTextSize(1);
-  display.setCursor(114, 50); 
+  display.setCursor(114 + ampmpixelShiftX, 50 + ampmpixelShiftY); 
   display.print(ampm);
   
   display.display();
